@@ -1,9 +1,9 @@
 import sqlite3
 import os
-from datetime import datetime, date
+from datetime import date
 from zoneinfo import ZoneInfo
 
-DB_PATH = os.environ.get("DB_PATH", "mentor.db")
+DB_PATH  = os.environ.get("DB_PATH", "mentor.db")
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Amsterdam")
 TZ = ZoneInfo(TIMEZONE)
 
@@ -23,11 +23,18 @@ class Database:
         with self._conn() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS users (
-                    user_id   INTEGER PRIMARY KEY,
-                    name      TEXT,
-                    work      TEXT,
-                    about     TEXT,
-                    created   TEXT DEFAULT (datetime('now'))
+                    user_id INTEGER PRIMARY KEY,
+                    name    TEXT,
+                    work    TEXT,
+                    about   TEXT,
+                    created TEXT DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS user_meta (
+                    user_id INTEGER,
+                    key     TEXT,
+                    value   TEXT,
+                    PRIMARY KEY (user_id, key)
                 );
 
                 CREATE TABLE IF NOT EXISTS goals (
@@ -47,46 +54,55 @@ class Database:
                 );
 
                 CREATE TABLE IF NOT EXISTS habit_log (
-                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id  INTEGER,
-                    habit    TEXT,
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id   INTEGER,
+                    habit     TEXT,
                     done_date TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS messages (
-                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id   INTEGER,
-                    role      TEXT,
-                    content   TEXT,
-                    created   TEXT DEFAULT (datetime('now'))
+                    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    role    TEXT,
+                    content TEXT,
+                    created TEXT DEFAULT (datetime('now'))
                 );
             """)
 
     # ── USERS ──────────────────────────────────────────────────────────────────
     def ensure_user(self, user_id: int):
         with self._conn() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,)
-            )
+            conn.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
 
     def get_profile(self, user_id: int) -> dict:
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM users WHERE user_id=?", (user_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
             return dict(row) if row else {}
 
     def update_profile(self, user_id: int, field: str, value: str):
-        allowed = {"name", "work", "about"}
-        if field not in allowed:
+        if field not in {"name", "work", "about"}:
             return
         with self._conn() as conn:
+            conn.execute(f"UPDATE users SET {field}=? WHERE user_id=?", (value, user_id))
+
+    # ── META (setup_step и прочее) ─────────────────────────────────────────────
+    def get_meta(self, user_id: int, key: str) -> str:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM user_meta WHERE user_id=? AND key=?", (user_id, key)
+            ).fetchone()
+            return row["value"] if row else ""
+
+    def set_meta(self, user_id: int, key: str, value: str):
+        with self._conn() as conn:
             conn.execute(
-                f"UPDATE users SET {field}=? WHERE user_id=?", (value, user_id)
+                "INSERT INTO user_meta (user_id, key, value) VALUES (?,?,?) "
+                "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value",
+                (user_id, key, value)
             )
 
     # ── GOALS ──────────────────────────────────────────────────────────────────
-    def get_goals(self, user_id: int) -> list[dict]:
+    def get_goals(self, user_id: int) -> list:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM goals WHERE user_id=? ORDER BY "
@@ -111,11 +127,10 @@ class Database:
             return cur.rowcount > 0
 
     # ── HABITS ─────────────────────────────────────────────────────────────────
-    def get_habits(self, user_id: int) -> list[dict]:
+    def get_habits(self, user_id: int) -> list:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM habits WHERE user_id=? ORDER BY time",
-                (user_id,)
+                "SELECT * FROM habits WHERE user_id=? ORDER BY time", (user_id,)
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -129,7 +144,6 @@ class Database:
     def mark_habit_done(self, user_id: int, habit_name: str):
         today = date.today().isoformat()
         with self._conn() as conn:
-            # Remove old entry if exists (allow re-marking)
             conn.execute(
                 "DELETE FROM habit_log WHERE user_id=? AND habit LIKE ? AND done_date=?",
                 (user_id, f"%{habit_name}%", today)
@@ -148,15 +162,6 @@ class Database:
             ).fetchone()
             return row is not None
 
-    def get_today_done_habits(self, user_id: int) -> list[str]:
-        today = date.today().isoformat()
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT habit FROM habit_log WHERE user_id=? AND done_date=?",
-                (user_id, today)
-            ).fetchall()
-            return [r["habit"] for r in rows]
-
     # ── MESSAGES ───────────────────────────────────────────────────────────────
     def save_message(self, user_id: int, role: str, content: str):
         with self._conn() as conn:
@@ -164,7 +169,6 @@ class Database:
                 "INSERT INTO messages (user_id, role, content) VALUES (?,?,?)",
                 (user_id, role, content)
             )
-            # Keep only last 200 messages per user
             conn.execute("""
                 DELETE FROM messages WHERE id IN (
                     SELECT id FROM messages WHERE user_id=?
@@ -172,7 +176,7 @@ class Database:
                 )
             """, (user_id,))
 
-    def get_recent_messages(self, user_id: int, limit: int = 30) -> list[dict]:
+    def get_recent_messages(self, user_id: int, limit: int = 30) -> list:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT role, content FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
